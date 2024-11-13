@@ -7,7 +7,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
 from os import listdir
 from tqdm import tqdm
-from scipy.stats import ks_2samp
+from scipy.stats import ks_2samp, mannwhitneyu
 from sklearn.preprocessing import StandardScaler
 from os.path import join
 import pygam
@@ -67,7 +67,7 @@ def merge_by_features(dataframe):
     # # merged.drop("index", axis=1, inplace=True)
     # return merged
 
-def build_gam_for_all(data, simulate=False):
+def build_gam_for_all(data):
     if simulate:
         df = data[data["KS"]==True]
     else:
@@ -195,24 +195,6 @@ def get_gam_data(load=True):
         df.to_csv(f"gam_results_ks.csv")
         return df
 
-def chatterjee_ks(df, cols=("feature_name","KS")):
-    def chatterjee_test(x, y):
-        df = pd.DataFrame(zip(x, y), columns=["x", "y"])
-        df["yranks"] = df["y"].rank()
-        df.head()
-        df = df.sort_values("x")  # Sort by the rank of X
-        df.head()
-        rank_series = df["yranks"].reset_index(drop=True)
-        diff = []
-        for i in range(len(rank_series) - 1):
-            diff.append(abs(rank_series[i + 1] - rank_series[i]))
-
-        xi = 1 - 3 * (sum(diff) / (len(y) ** 2 - 1))
-        return xi
-
-    return df.groupby(cols).apply(lambda x: chatterjee_test(x["feature"], x["loss"]))
-
-
 
 def simulate_sampling(df, samples, sample_size):
     def sample_loss_feature(group, n_samples, n_size):
@@ -220,8 +202,25 @@ def simulate_sampling(df, samples, sample_size):
         for i in range(n_samples):
             sample = group.sample(n=n_size, replace=True)  # Sampling with replacement
             mean_loss = sample['loss'].mean()
-            mean_feature = sample['feature'].mean()
-            samples.append({'loss': mean_loss, 'feature': mean_feature, "KS":False})
+            samples.append([{'loss':mean_loss,
+                            'feature': sample['feature'].mean(), "reduction":"mean"},
+                           {'loss': mean_loss,
+                            'feature': ks_2samp(df[df["fold"]=="train"]["feature"], sample['feature'])[0], "reduction":"ks"},
+                            {'loss': mean_loss,
+                             'feature': mannwhitneyu(df[df["fold"] == "train"]["feature"], sample['feature'])[0],
+                             "reduction": "ks"},
+                            {'loss': mean_loss,
+                             'feature': np.std(sample['feature']),
+                             "reduction": "std"},
+                            {'loss': mean_loss,
+                             'feature': sample['feature'].iqr(),
+                             "reduction": "iqr"},
+                            {'loss': mean_loss,
+                             'feature': sample['feature'].skew(),
+                             "reduction": "skew"}
+                            ]
+                           )
+
             # samples.append({'loss': mean_loss, 'feature': ks_2samp(df[df["fold"]=="train"]["feature"], sample['feature'])[0], "KS":True})
         return pd.DataFrame(samples)
         # Return a DataFrame of means with the original group keys
@@ -234,44 +233,30 @@ def simulate_sampling(df, samples, sample_size):
 
 
 
-def load_dfs(sample_size, path="single_data/", simulate=False, samples=100):
+def load_dfs(sample_size, path="single_data/", samples=100):
     dfs = []
     for fname in tqdm(listdir(path)):
-        if "ks" not in fname and not any(shift in fname for shift in ["dropout", "saturation", "brightness", "smear", "odin"]):
-            df = pd.read_csv(join(path,fname))
-            dataset= fname.split("_")[0]
-            shift = fname.split("_")[1]
-            df["Shift"]=shift
-            df["Dataset"]=dataset
-            if simulate:
-                df=simulate_sampling(df,samples,sample_size)
-            else:
-                df["KS"] = False
-            dfs.append(df)
+        df = pd.read_csv(join(path,fname))
+        dataset= fname.split("_")[0]
+        shift = fname.split("_")[1]
+        df["Shift"]=shift
+        df["Dataset"]=dataset
+        df=simulate_sampling(df,samples,sample_size)
+        dfs.append(df)
     merged = pd.concat(dfs)
     merged = merged[merged["fold"]!="train"]
     merged["Shift Severity"] = merged["fold"].apply(
         lambda x: round(float(x.split("_")[1]), 2) if "_" in x else 0 if "ind" in x else "ood")
+    
     return merged
 
-def compare_ks_vs_no_ks(sample_size):
 
-    df = load_dfs(sample_size=sample_size, simulate=True)
-    df["ind"] = df["fold"] == "ind"
-    df.replace({"normal": "Organic Shift"}, inplace=True)
-    df.loc[df["fold"] == "ind", "Shift"] = "ind"
-    hues = df["Shift"].unique()
-    df = df[df["Dataset"] == "NICO"]
-    g = sns.FacetGrid(df, row="KS", col="feature_name", margin_titles=True, sharex=False, sharey=True)
-    g.map_dataframe(sns.scatterplot, x="feature", y="loss", hue="Shift", hue_order=hues, alpha=0.5)
-    g.add_legend()
-    plt.show()
 def regplots(sample_size, simulate):
     def bin_Y(group, bins):
         group['feature_bin'] = pd.qcut(group['feature'], bins, labels=False, duplicates='drop')
         return group
 
-    df = load_dfs(sample_size=sample_size, simulate=simulate)
+    df = load_dfs(sample_size=sample_size, )
     df["ind"]=df["fold"]=="ind"
     df.replace({"normal":"Organic Shift"}, inplace=True)
     df.loc[df["fold"]=="ind", "Shift"] = "ind"
@@ -305,12 +290,12 @@ def show_thresholding_problems():
 
 
 def classification_metrics(sample_size=100, simulate=True):
-    df = load_dfs(sample_size, simulate=simulate)
+    df = load_dfs(sample_size, )
     # auroc(df)
     variance(df)
 
-def correleations(sample_size=100, simulate=False):
-    df = load_dfs(sample_size, simulate=simulate)
+def correleations(sample_size=100):
+    df = load_dfs(sample_size, )
     sprm = spearman(df, cols=["Dataset", "feature_name", "KS"])
     kndl = kendall(df, cols=["Dataset", "feature_name", "KS"])
     prs = pearson(df, cols=["Dataset", "feature_name", "KS"])
@@ -332,29 +317,6 @@ def quantize_values_and_plot_kdes():
       fill=True, alpha=1, linewidth=1.5)
             plt.show()
 
-
-def regplot_by_shift(sample_size, simulate=False):
-
-    df = load_dfs(sample_size=sample_size, simulate=simulate)
-    df["ind"]=df["fold"]=="ind"
-    df["Shift Severity"]=df["fold"].apply(lambda x: round(float(x.split("_")[1]),2) if "_" in x else x)
-    df.rename(columns={"feature_name":"Feature"}, inplace=True)
-    df.replace({"typicality":"Typicality", "cross_entropy":"Cross Entropy", "knn":"KNN", "odin":"ODIN", "grad_magnitude":"GradNorm", "energy":"Energy", "softmax":"Softmax"}, inplace=True)
-    hues = df["Shift Severity"].unique()
-    if simulate:
-        df = df[df["KS"]==False]
-    df.replace({"normal":"Organic Shift"}, inplace=True)
-    g = sns.FacetGrid(df, row="Shift", col="Feature", margin_titles=True, sharex=False, sharey=False)
-    g.map_dataframe(sns.scatterplot, x="feature", y="loss", hue="Shift Severity", hue_order=hues)
-    g.add_legend()
-    plt.show()
-
-
-def sanity_check():
-    df = load_dfs(100, simulate=False)
-    g = sns.FacetGrid(df, row="Shift", margin_titles=True)
-    g.map_dataframe(sns.kdeplot, x="feature", hue="feature_name", common_norm=False)
-    plt.show()
 
 
 def plot_variances(df):
@@ -500,7 +462,7 @@ if __name__ == '__main__':
     # print(test.groupby(["Dataset", "train_shift",  "feature_name"])[["mape", "mae"]].mean())
 
     # print("Starting")
-    # plot_variances(load_dfs(100, simulate=False))
+    # plot_variances(load_dfs(100))
     # build_gam_for_all(load_dfs(100, simulate=True), simulate=True)
 
     # get_gam_data(load=True)
@@ -514,7 +476,7 @@ if __name__ == '__main__':
     # correleations(100, simulate=True)
     # regplot_by_shift(10, simulate=True)
     # regplot_by_shift(100, simulate=True)
-    # correleations(100, simulate=False)
+    # correleations(100)
     # sanity_check()
     # classification_metrics(simulate=False)
     # correleations(100, simulate=True)
